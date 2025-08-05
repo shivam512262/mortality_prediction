@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mortality Prediction API Tester</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles for Inter font and basic body styling */
+        body {
+            font-family: "Inter", sans-serif;
+            background-color: #f0f4f8; /* Light background */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            background-color: #ffffff;
+            padding: 2.5rem; /* Increased padding */
+            border-radius: 1rem; /* More rounded corners */
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1); /* Stronger shadow */
+            max-width: 600px;
+            width: 100%;
+            text-align: center;
+        }
+        .btn {
+            @apply px-6 py-3 rounded-lg font-semibold text-white transition-all duration-300 ease-in-out;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .btn-blue {
+            @apply bg-blue-600 hover:bg-blue-700;
+        }
+        .input-field {
+            @apply w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500;
+        }
+        .loading-spinner {
+            border: 4px solid #f3f3f3; /* Light grey */
+            border-top: 4px solid #3498db; /* Blue */
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+            display: none; /* Hidden by default */
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="bg-gray-100 flex items-center justify-center min-h-screen">
+    <div class="container">
+        <h1 class="text-3xl font-bold text-gray-800 mb-6">Mortality Prediction Tester</h1>
+
+        <div class="mb-6">
+            <label for="modelChoice" class="block text-gray-700 text-sm font-bold mb-2">
+                Select Model:
+            </label>
+            <select id="modelChoice" class="input-field">
+                <option value="lgbm">LightGBM</option>
+                <option value="xgb">XGBoost</option>
+            </select>
+        </div>
+
+        <div class="flex flex-col sm:flex-row gap-4 mb-6 justify-center">
+            <button id="predictPatientBtn" class="btn btn-blue">Predict Patient Data</button>
+        </div>
+
+        <div id="loadingSpinner" class="loading-spinner"></div>
+
+        <div id="result" class="mt-8 p-6 bg-blue-50 border border-blue-200 rounded-lg text-left text-gray-800 hidden">
+            <h2 class="text-xl font-semibold mb-3">Prediction Result:</h2>
+            <p id="predictionText" class="text-lg font-medium"></p>
+            <p id="probabilityText" class="text-md text-gray-700"></p>
+            <p id="errorText" class="text-red-600 text-md hidden mt-2"></p>
+        </div>
+    </div>
+
+    <script>
+        const apiUrl = 'http://127.0.0.1:8000/predict_mortality/'; // Adjust if your FastAPI is on a different host/port
+
+        // DOM elements
+        const modelChoiceSelect = document.getElementById('modelChoice');
+        const predictPatientBtn = document.getElementById('predictPatientBtn');
+        const loadingSpinner = document.getElementById('loadingSpinner');
+        const resultDiv = document.getElementById('result');
+        const predictionText = document.getElementById('predictionText');
+        const probabilityText = document.getElementById('probabilityText');
+        const errorText = document.getElementById('errorText');
+
+        // Comprehensive Patient Data including all MODEL_FEATURES
+        // Values are illustrative; adjust them to represent a patient you want to test.
+        // For simplicity, 'Time' is '00:00' and 'RecordID' is a placeholder.
+        const patient_data_full_fields = [
+            {'Time': '00:00', 'Parameter': 'RecordID', 'Value': 999903},
+            {'Time': '00:00', 'Parameter': 'Age', 'Value': 65},
+            {'Time': '00:00', 'Parameter': 'Gender', 'Value': 0}, // 0 for Male, 1 for Female
+            {'Time': '00:00', 'Parameter': 'Height', 'Value': 170.0}, // Example value
+            {'Time': '00:00', 'Parameter': 'Weight', 'Value': 70.0}, // Example value
+            {'Time': '00:00', 'Parameter': 'Urine', 'Value': 50.0}, // Example value (e.g., ml/hr)
+            {'Time': '00:00', 'Parameter': 'HR', 'Value': 85}, // Heart Rate
+            {'Time': '00:00', 'Parameter': 'Temp', 'Value': 37.5}, // Temperature
+            {'Time': '00:00', 'Parameter': 'NIDiasABP', 'Value': 70}, // Non-invasive Diastolic BP
+            {'Time': '00:00', 'Parameter': 'SysABP', 'Value': 120}, // Systolic Arterial Blood Pressure
+            {'Time': '00:00', 'Parameter': 'DiasABP', 'Value': 80}, // Diastolic Arterial Blood Pressure
+            {'Time': '00:00', 'Parameter': 'pH', 'Value': 7.38}, // pH
+            {'Time': '00:00', 'Parameter': 'PaCO2', 'Value': 42}, // Partial pressure of carbon dioxide in arterial blood
+            {'Time': '00:00', 'Parameter': 'PaO2', 'Value': 85}, // Partial pressure of oxygen in arterial blood
+            {'Time': '00:00', 'Parameter': 'Platelets', 'Value': 250}, // Platelet count (x10^3/uL)
+            {'Time': '00:00', 'Parameter': 'MAP', 'Value': 95}, // Mean Arterial Pressure
+            {'Time': '00:00', 'Parameter': 'K', 'Value': 4.0}, // Potassium (mEq/L)
+            {'Time': '00:00', 'Parameter': 'Na', 'Value': 140}, // Sodium (mEq/L)
+            {'Time': '00:00', 'Parameter': 'FiO2', 'Value': 0.21}, // Fractio   n of inspired oxygen
+            {'Time': '00:00', 'Parameter': 'GCS', 'Value': 15}, // Glasgow Coma Scale
+            {'Time': '00:00', 'Parameter': 'ICUType', 'Value': 1}, // ICU Type (e.g., 1, 2, 3, 4)
+        ];
+
+
+        // Function to make the API call
+        async function callPredictionApi(patientData) {
+            resultDiv.classList.add('hidden'); // Hide previous results
+            errorText.classList.add('hidden'); // Hide previous errors
+            loadingSpinner.style.display = 'block'; // Show spinner
+
+            const modelChoice = modelChoiceSelect.value;
+
+            try {
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        patient_data: patientData,
+                        model_choice: modelChoice
+                    }),
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    predictionText.textContent = `Outcome: ${data.prediction}`;
+                    probabilityText.textContent = `Probability of Death: ${(data.probability_of_death * 100).toFixed(2)}%`;
+                    resultDiv.classList.remove('hidden');
+                } else {
+                    // Handle API errors (e.g., 400, 500 status codes)
+                    errorText.textContent = `API Error: ${data.detail || 'Unknown error'}`;
+                    errorText.classList.remove('hidden');
+                    resultDiv.classList.remove('hidden'); // Show result div to display error
+                }
+            } catch (error) {
+                // Handle network errors or issues with the fetch request
+                errorText.textContent = `Network Error: Could not connect to the API. Is it running at ${apiUrl}? ${error.message}`;
+                errorText.classList.remove('hidden');
+                resultDiv.classList.remove('hidden'); // Show result div to display error
+            } finally {
+                loadingSpinner.style.display = 'none'; // Hide spinner
+            }
+        }
+
+        // Event Listener for the single button
+        predictPatientBtn.addEventListener('click', () => callPredictionApi(patient_data_full_fields));
+    </script>
+</body>
+</html>
