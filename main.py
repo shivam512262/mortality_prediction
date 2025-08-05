@@ -17,6 +17,31 @@ MODEL_FEATURES = [
     'Na', 'FiO2', 'GCS', 'ICUType'
 ]
 
+# --- Pydantic Models for Request and Response (MOVED TO TOP) ---
+# These models define the expected structure of the JSON data sent to and received from the API.
+class PatientRecord(BaseModel):
+    """Defines the structure of a single patient observation."""
+    Time: str
+    Parameter: str
+    Value: float
+
+class PredictionRequest(BaseModel):
+    """Defines the structure of the request body for mortality prediction."""
+    patient_data: list[PatientRecord] # A list of patient observations
+    model_choice: str = 'lgbm'      # The model to use, with 'lgbm' as default
+
+class PredictionResponse(BaseModel):
+    """Defines the structure of the response body for mortality prediction."""
+    prediction: str
+    probability_of_death: float
+
+# NEW: Pydantic Model for SHAP Explanation Response
+class ShapExplanationResponse(BaseModel):
+    explanation_text: str
+    base_value: float
+    feature_contributions: dict # Dictionary of feature_name: shap_value
+
+
 # --- Global Model Loading ---
 # Load models and imputer globally when the app starts.
 # This is a critical optimization to avoid reloading large files on every request,
@@ -108,17 +133,22 @@ def extract_to_dict(df: pd.DataFrame, features: list) -> pd.DataFrame:
 
 # --- Core Prediction Logic: predict_mortality_api ---
 # This function encapsulates the model prediction and data processing logic.
-def predict_mortality_api(raw_patient_df: pd.DataFrame, model_choice: str = 'lgbm'):
+# MODIFIED: Now accepts a list of PatientRecord and converts it to DataFrame internally.
+def predict_mortality_api(patient_records: list[PatientRecord], model_choice: str = 'lgbm'):
     """
     Predicts patient mortality based on raw patient data using a chosen model.
 
     Args:
-        raw_patient_df (pd.DataFrame): DataFrame containing raw patient observations.
+        patient_records (list[PatientRecord]): List of Pydantic PatientRecord models.
         model_choice (str): The choice of model ('lgbm' or 'xgb').
 
     Returns:
-        dict: A dictionary containing the prediction outcome and probability of death.
+        tuple: A tuple containing a dictionary with prediction outcome/probability
+               and the SHAP explanation object.
     """
+    # Convert the list of Pydantic models to a pandas DataFrame
+    raw_patient_df = pd.DataFrame([p.dict() for p in patient_records])
+
     # Ensure core models and imputer are loaded before proceeding
     if IMPUTER is None or LGBM_MODEL is None or LGBM_SHAP_EXPLAINER is None:
         raise HTTPException(status_code=500, detail="Essential model files (imputer, LGBM) not loaded on server startup. Please check server logs.")
@@ -129,7 +159,7 @@ def predict_mortality_api(raw_patient_df: pd.DataFrame, model_choice: str = 'lgb
     # Select the appropriate model and explainer based on user choice
     if model_choice == 'lgbm':
         model = LGBM_MODEL
-        explainer = LGBM_SHAP_EXPLAINER
+        explainer = LGBM_SHAP_EXPLAINER # Corrected typo here
     elif model_choice == 'xgb':
         if XGB_MODEL is None or XGB_SHAP_EXPLAINER is None:
             raise HTTPException(status_code=400, detail="XGBoost models are not loaded. Please select LightGBM or ensure XGBoost models are available.")
@@ -152,28 +182,13 @@ def predict_mortality_api(raw_patient_df: pd.DataFrame, model_choice: str = 'lgb
     prediction_proba = model.predict_proba(final_df)[0][1]
     outcome = "Predicted to Die" if prediction_class == 1 else "Predicted to Survive"
 
+    # Generate SHAP explanation
+    explanation = explainer(final_df)
+
     return {
         "prediction": outcome,
         "probability_of_death": round(prediction_proba, 4), # Round probability for cleaner output
-    }
-
-# --- Pydantic Models for Request and Response ---
-# These models define the expected structure of the JSON data sent to and received from the API.
-class PatientRecord(BaseModel):
-    """Defines the structure of a single patient observation."""
-    Time: str
-    Parameter: str
-    Value: float
-
-class PredictionRequest(BaseModel):
-    """Defines the structure of the request body for mortality prediction."""
-    patient_data: list[PatientRecord] # A list of patient observations
-    model_choice: str = 'lgbm'      # The model to use, with 'lgbm' as default
-
-class PredictionResponse(BaseModel):
-    """Defines the structure of the response body for mortality prediction."""
-    prediction: str
-    probability_of_death: float
+    }, explanation # Return explanation object
 
 # --- API Endpoints ---
 @app.post("/predict_mortality/", response_model=PredictionResponse)
@@ -182,18 +197,54 @@ async def get_mortality_prediction(request: PredictionRequest):
     Endpoint to predict patient mortality.
     Receives raw patient data and a model choice, returns prediction and probability.
     """
-    # Convert the incoming list of Pydantic models to a pandas DataFrame
-    raw_patient_df = pd.DataFrame([p.dict() for p in request.patient_data])
+    # Call the core prediction logic, but only use the prediction result
+    prediction_result, _ = predict_mortality_api(request.patient_data, request.model_choice)
+    return prediction_result
+
+# NEW API ENDPOINT: To get SHAP explanation in text format
+@app.post("/explain_mortality_shap/", response_model=ShapExplanationResponse)
+async def get_mortality_shap_explanation(request: PredictionRequest):
+    """
+    Endpoint to get SHAP explanation for mortality prediction in a text format.
+    Receives raw patient data and a model choice, returns SHAP explanation.
+    """
     try:
-        # Call the core prediction logic
-        result = predict_mortality_api(raw_patient_df, request.model_choice)
-        return result
+        # Pass request.patient_data directly to predict_mortality_api, which now handles DataFrame conversion
+        _, explanation = predict_mortality_api(request.patient_data, request.model_choice)
+
+        # Extract SHAP values and base value for the first instance
+        shap_values = explanation.values[0]
+        base_value = explanation.base_values[0]
+        feature_names = explanation.feature_names if explanation.feature_names is not None else MODEL_FEATURES
+
+        # Create a dictionary of feature contributions
+        feature_contributions = {}
+        for i, feature_name in enumerate(feature_names):
+            feature_contributions[feature_name] = round(float(shap_values[i]), 4)
+
+        # Sort features by absolute SHAP value for readability
+        sorted_contributions = sorted(feature_contributions.items(), key=lambda item: abs(item[1]), reverse=True)
+
+        explanation_lines = [
+            f"SHAP Explanation for Mortality Prediction:",
+            f"Base Value (expected model output without features): {round(float(base_value), 4)}",
+            f"Feature Contributions (sorted by impact):"
+        ]
+        for feature, shap_val in sorted_contributions:
+            explanation_lines.append(f"  - {feature}: {shap_val}")
+
+        explanation_text = "\n".join(explanation_lines)
+
+        return ShapExplanationResponse(
+            explanation_text=explanation_text,
+            base_value=float(base_value),
+            feature_contributions=feature_contributions
+        )
     except HTTPException as e:
-        # Re-raise HTTPExceptions directly
         raise e
     except Exception as e:
-        # Catch any other unexpected errors and then return a 500 Internal Server Error
-        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"An internal server error occurred during SHAP explanation: {str(e)}")
+
 
 @app.get("/")
 async def root():
